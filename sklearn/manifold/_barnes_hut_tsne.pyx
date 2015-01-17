@@ -35,6 +35,12 @@ cdef extern from "time.h":
     double CLOCKS_PER_SEC
 
 
+cdef extern from "cblas.h":
+    float snrm2 "cblas_snrm2"(int N, float *X, int incX) nogil
+    void scopy "cblas_scopy"(int N, float* X, int incX, float* Y, int incY) nogil
+    void saxpy "cblas_saxpy"(int N, float alpha, float *X, int incX, float *Y, int incY) nogil
+
+
 cdef struct Node:
     # Keep track of the center of mass
     float[3] cum_com
@@ -57,6 +63,8 @@ cdef struct Node:
     # The width of this node -- used to calculate the opening
     # angle. Equal to width = re - le
     float[3] w
+    # The value of the maximum width w
+    float max_width
 
     # Does this node have children?
     # Default to leaf until we add particles
@@ -109,12 +117,15 @@ cdef Node* create_root(float[:] left_edge, float[:] width, int dimension) nogil:
     root.cum_size = 0
     root.size = 0
     root.point_index = -1
+    root.max_width = 0.0
     for ax in range(dimension):
         root.w[ax] = width[ax]
         root.le[ax] = left_edge[ax]
         root.c[ax] = 0.0
         root.cum_com[ax] = 0.
-        root.cur_pos[ax] = -1.
+        root.cur_pos[ax] = -1
+    for ax in range(dimension):
+        root.max_width = max(root.max_width, root.w[ax])
     if DEBUGFLAG:
         printf("[t-SNE] Created root node %p\n", root)
     return root
@@ -131,12 +142,15 @@ cdef Node* create_child(Node *parent, int[3] offset) nogil:
     child.cum_size = 0
     child.point_index = -1
     child.tree = parent.tree
+    child.max_width = 0.0
     for ax in range(parent.tree.dimension):
         child.w[ax] = parent.w[ax] / 2.0
         child.le[ax] = parent.le[ax] + offset[ax] * parent.w[ax] / 2.0
         child.c[ax] = child.le[ax] + child.w[ax] / 2.0
         child.cum_com[ax] = 0.
         child.cur_pos[ax] = -1.
+    for ax in range(parent.tree.dimension):
+        child.max_width = max(child.max_width, child.w[ax])
     child.tree.num_cells += 1
     return child
 
@@ -382,7 +396,7 @@ cdef long count_points(Node* root, long count) nogil:
     return count
 
 
-cdef void compute_gradient(float[:,:] val_P,
+cdef int compute_gradient(float[:,:] val_P,
                            float[:,:] pos_reference,
                            long[:,:] neighbors,
                            float[:,:] tot_force,
@@ -393,7 +407,7 @@ cdef void compute_gradient(float[:,:] val_P,
     # Having created the tree, calculate the gradient
     # in two components, the positive and negative forces
     cdef long i, coord
-    cdef int ax
+    cdef int ax, error
     cdef long n = pos_reference.shape[0]
     cdef int dimension = root_node.tree.dimension
     if root_node.tree.verbose > 11:
@@ -401,33 +415,55 @@ cdef void compute_gradient(float[:,:] val_P,
                 n * dimension * 2)
     cdef float* sum_Q = <float*> malloc(sizeof(float))
     cdef float* neg_f = <float*> malloc(sizeof(float) * n * dimension)
+    cdef float* neg_f_fast = <float*> malloc(sizeof(float) * n * dimension)
     cdef float* pos_f = <float*> malloc(sizeof(float) * n * dimension)
     cdef clock_t t1, t2
+    cdef float sum_Qa, sum_Qb
 
     sum_Q[0] = 0.0
-    if root_node.tree.verbose > 11:
+    if root_node.tree.verbose > 21:
         printf("[t-SNE] Computing positive gradient\n")
     t1 = clock()
     compute_gradient_positive_nn(val_P, pos_reference, neighbors, pos_f,
             dimension, start)
     t2 = clock()
     if root_node.tree.verbose > 15:
-        printf("[t-SNE]  nn pos: %e ticks\n", ((float) (t2 - t1)))
-    if root_node.tree.verbose > 11:
+        printf("[t-SNE] Computing positive gradient: %e ticks\n", ((float) (t2 - t1)))
+    if root_node.tree.verbose > 21:
         printf("[t-SNE] Computing negative gradient\n")
     t1 = clock()
+    sum_Qa = sum_Q[0]
+    compute_gradient_negative_fast(val_P, pos_reference, neg_f_fast, root_node, sum_Q, 
+                              theta, start, stop)
+    sum_Qa = sum_Q[0] - sum_Qa
+    t2 = clock()
+    if root_node.tree.verbose > 15:
+        printf("[t-SNE] Negative fast: %e ticks\n", ((float) (t2 - t1)))
+    t1 = clock()
+    sum_Qb = sum_Q[0]
     compute_gradient_negative(val_P, pos_reference, neg_f, root_node, sum_Q, 
                               theta, start, stop)
+    sum_Qb = sum_Q[0] - sum_Qb
     t2 = clock()
     if root_node.tree.verbose > 15:
         printf("[t-SNE] Negative: %e ticks\n", ((float) (t2 - t1)))
+    error = 0
+    if fabsf(sum_Qb - sum_Qa) / sum_Qa > 1e-2:
+        printf("DIFFERENECE in sum_Qa=%1.1e sum_Qb=%1.1e\n", sum_Qa, sum_Qb)
+        error = 1
     for i in range(start, n):
         for ax in range(dimension):
             coord = i * dimension + ax
             tot_force[i, ax] = pos_f[coord] - (neg_f[coord] / sum_Q[0])
+            if fabsf(neg_f[i] - neg_f_fast[i]) / neg_f[i] > 1e-3:
+                printf("DIFFERENCE in %i: %1.5e %1.5e\n", i, neg_f[i],
+                        neg_f_fast[i])
+                error = 1
     free(sum_Q)
     free(neg_f)
+    free(neg_f_fast)
     free(pos_f)
+    return error
 
 cdef void compute_gradient_positive(float[:,:] val_P,
                                     float[:,:] pos_reference,
@@ -531,6 +567,92 @@ cdef void compute_gradient_negative(float[:,:] val_P,
     free(force)
     free(pos)
 
+cdef void compute_gradient_negative_fast(float[:,:] val_P, 
+                                         float[:,:] pos_reference,
+                                         float* neg_f,
+                                         Node *root_node,
+                                         float* sum_Q,
+                                         float theta, 
+                                         long start, 
+                                         long stop) nogil:
+    if stop == -1:
+        stop = pos_reference.shape[0] 
+    cdef:
+        int ax
+        long i, j
+        long n = stop - start
+        float* force
+        float* iQ 
+        float* pos
+        float* dist2s
+        long* sizes
+        float* deltas
+        long* l
+        int dimension = root_node.tree.dimension
+        float qijZ, mult
+        int krange
+        long idx, 
+        long dta = 0
+        long dtb = 0
+        clock_t t1, t2, t3
+        # Delete
+        float* neg_force
+
+    iQ = <float*> malloc(sizeof(float))
+    force = <float*> malloc(sizeof(float) * dimension)
+    pos = <float*> malloc(sizeof(float) * dimension)
+    dist2s = <float*> malloc(sizeof(float) * n)
+    sizes = <long*> malloc(sizeof(long) * n)
+    deltas = <float*> malloc(sizeof(float) * n * dimension)
+    l = <long*> malloc(sizeof(long))
+    neg_force= <float*> malloc(sizeof(float) * dimension)
+    if dimension > 2:
+        krange = 2
+    else:
+        krange = 1
+
+    for i in range(start, stop):
+        # Clear the arrays
+        for ax in range(dimension):
+            force[ax] = 0.0
+            neg_force[ax] = 0.0
+            pos[ax] = pos_reference[i, ax]
+        iQ[0] = 0.0
+        l[0] = 0
+        # Find which nodes are summarizing and collect their centers of mass
+        # deltas, and sizes, into vectorized arrays
+        t1 = clock()
+        compute_non_edge_forces_fast(root_node, theta, i, pos, force, dist2s,
+                                     sizes, deltas, l, krange)
+        t2 = clock()
+        # Compute the t-SNE negative force
+        # for the digits dataset, walking the tree
+        # is about 10-15x more expensive than the 
+        # following for loop
+        for j in range(l[0]):
+            qijZ = 1.0 / (1.0 + dist2s[j])
+            sum_Q[0] += sizes[j] * qijZ
+            mult = sizes[j] * qijZ * qijZ
+            for ax in range(dimension):
+                idx = j * dimension + ax
+                neg_force[ax] += mult * deltas[idx]
+        t3 = clock()
+        for ax in range(dimension):
+            neg_f[i * dimension + ax] = neg_force[ax]
+        dta += t2 - t1
+        dtb += t3 - t2
+    if root_node.tree.verbose > 20:
+        printf("[t-SNE] Tree: %i clock ticks | ", dta)
+        printf("Force computation: %i clock ticks\n", dtb)
+    free(iQ)
+    free(force)
+    free(pos)
+    free(dist2s)
+    free(sizes)
+    free(deltas)
+    free(l)
+    free(neg_force)
+
 
 cdef void compute_non_edge_forces(Node* node, 
                                   float theta,
@@ -545,7 +667,6 @@ cdef void compute_non_edge_forces(Node* node,
         int summary = 0
         int dimension = node.tree.dimension
         float dist2, mult, qijZ
-        float wmax = 0.0
         float* delta  = <float*> malloc(sizeof(float) * dimension)
     
     if node.tree.dimension > 2:
@@ -571,11 +692,7 @@ cdef void compute_non_edge_forces(Node* node,
         # is relatively small (w.r.t. to theta) or if it is a leaf node.
         # If it can be summarized, we use the cell center of mass 
         # Otherwise, we go a higher level of resolution and into the leaves.
-        for i in range(dimension):
-            wmax = max(wmax, node.w[i])
-
-        summary = (wmax / sqrt(dist2) < theta)
-
+        summary = (node.max_width / sqrt(dist2) < theta)
         if node.is_leaf or summary:
             # Compute the t-SNE force between the reference point and the
             # current node
@@ -595,8 +712,67 @@ cdef void compute_non_edge_forces(Node* node,
                         compute_non_edge_forces(child, theta, sum_Q, 
                                                      point_index,
                                                      pos, force)
-
     free(delta)
+
+
+cdef void compute_non_edge_forces_fast(Node* node, 
+                                  float theta,
+                                  long point_index,
+                                  float* pos,
+                                  float* force,
+                                  float* dist2s,
+                                  long* sizes,
+                                  float* deltas,
+                                  long* l,
+                                  int krange
+                                  ) nogil:
+    # Compute the t-SNE force on the point in pos given by point_index
+    cdef:
+        Node* child
+        int i, j
+        int dimension = node.tree.dimension
+        long idx, idx1
+        float dist_check
+    
+    # There are no points below this node if cum_size == 0
+    # so do not bother to calculate any force contributions
+    # Also do not compute self-interactions
+    if node.cum_size > 0 and not (node.is_leaf and (node.point_index ==
+        point_index)):
+        # Compute distance between node center of mass and the reference point
+        # I've tried rewriting this in terms of BLAS functions, but it's about
+        # 1.5x worse when we do so, probbaly because the vectors are small
+        idx1 = l[0] * dimension
+        deltas[idx1] = pos[0] - node.cum_com[0]
+        idx = idx1
+        for i in range(1, dimension):
+            idx += 1
+            deltas[idx] = pos[i] - node.cum_com[i] 
+        # do np.sqrt(np.sum(deltas**2.0))
+        dist2s[l[0]] = snrm2(dimension, &deltas[idx1], 1)
+        # Check whether we can use this node as a summary
+        # It's a summary node if the angular size as measured from the point
+        # is relatively small (w.r.t. to theta) or if it is a leaf node.
+        # If it can be summarized, we use the cell center of mass 
+        # Otherwise, we go a higher level of resolution and into the leaves.
+        if node.is_leaf or ((node.max_width / dist2s[l[0]]) < theta):
+            # Compute the t-SNE force between the reference point and the
+            # current node
+            sizes[l[0]] = node.cum_size
+            dist2s[l[0]] = dist2s[l[0]] * dist2s[l[0]]
+            l[0] += 1
+        else:
+            # Recursively apply Barnes-Hut to child nodes
+            for i in range(dimension):
+                for j in range(dimension):
+                    for k in range(krange):
+                        child = node.children[i][j][k]
+                        if child.cum_size == 0: 
+                            continue
+                        compute_non_edge_forces_fast(child, theta,
+                                point_index, pos, force, dist2s, sizes, deltas,
+                                l, krange)
+
 
 def calculate_edge(pos_output):
     # Make the boundaries slightly outside of the data

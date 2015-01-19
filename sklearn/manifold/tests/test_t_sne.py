@@ -547,3 +547,9 @@ def test_quadtree_similar_point():
         assert_equal(counts[0], counts[1], m)
         m = "Tree consistency failed: unexpected number of points on the tree"
         assert_equal(counts[0], counts[2], m)
+
+
+def test_index_offset():
+    """Make sure translating between 1D and N-D indices are preserved"""
+    _barnes_hut_tsne.test_index2offset()
+    _barnes_hut_tsne.test_index_offset()

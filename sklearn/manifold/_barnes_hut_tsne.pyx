@@ -10,7 +10,7 @@
 
 from libc.stdlib cimport malloc, free
 from libc.stdio cimport printf
-from libc.math cimport sqrt
+from libc.math cimport sqrt, log
 cimport numpy as np
 import numpy as np
 
@@ -431,18 +431,19 @@ cdef long count_points(Node* root, long count) nogil:
     return count
 
 
-cdef int compute_gradient(float[:,:] val_P,
-                           float[:,:] pos_reference,
-                           long[:,:] neighbors,
-                           float[:,:] tot_force,
-                           Node* root_node,
-                           float theta,
-                           long start,
-                           long stop) nogil:
+cdef float compute_gradient(float[:,:] val_P,
+                            float[:,:] pos_reference,
+                            long[:,:] neighbors,
+                            float[:,:] tot_force,
+                            Node* root_node,
+                            float theta,
+                            float dof,
+                            long start,
+                            long stop) nogil:
     # Having created the tree, calculate the gradient
     # in two components, the positive and negative forces
     cdef long i, coord
-    cdef int ax, error
+    cdef int ax
     cdef long n = pos_reference.shape[0]
     cdef int dimension = root_node.tree.dimension
     if root_node.tree.verbose > 11:
@@ -453,88 +454,41 @@ cdef int compute_gradient(float[:,:] val_P,
     cdef float* neg_f_fast = <float*> malloc(sizeof(float) * n * dimension)
     cdef float* pos_f = <float*> malloc(sizeof(float) * n * dimension)
     cdef clock_t t1, t2
-    cdef float sum_Qa, sum_Qb
+    cdef float sQ 
 
     sum_Q[0] = 0.0
-    if root_node.tree.verbose > 21:
-        printf("[t-SNE] Computing positive gradient\n")
     t1 = clock()
-    compute_gradient_positive_nn(val_P, pos_reference, neighbors, pos_f,
-            dimension, start)
+    compute_gradient_positive(val_P, pos_reference, neighbors, pos_f,
+                              dimension, dof, start)
     t2 = clock()
     if root_node.tree.verbose > 15:
         printf("[t-SNE] Computing positive gradient: %e ticks\n", ((float) (t2 - t1)))
-    if root_node.tree.verbose > 21:
-        printf("[t-SNE] Computing negative gradient\n")
     t1 = clock()
-    sum_Qa = sum_Q[0]
-    compute_gradient_negative_fast(val_P, pos_reference, neg_f_fast, root_node, sum_Q, 
-                              theta, start, stop)
-    sum_Qa = sum_Q[0] - sum_Qa
+    compute_gradient_negative(val_P, pos_reference, neg_f, root_node, sum_Q,
+                              dof, theta, start, stop)
     t2 = clock()
     if root_node.tree.verbose > 15:
-        printf("[t-SNE] Negative fast: %e ticks\n", ((float) (t2 - t1)))
-    t1 = clock()
-    sum_Qb = sum_Q[0]
-    compute_gradient_negative(val_P, pos_reference, neg_f, root_node, sum_Q, 
-                              theta, start, stop)
-    sum_Qb = sum_Q[0] - sum_Qb
-    t2 = clock()
-    if root_node.tree.verbose > 15:
-        printf("[t-SNE] Negative: %e ticks\n", ((float) (t2 - t1)))
+        printf("[t-SNE] Computing negative gradient: %e ticks\n", ((float) (t2 - t1)))
     error = 0
-    if fabsf(sum_Qb - sum_Qa) / sum_Qa > 1e-2:
-        printf("DIFFERENECE in sum_Qa=%1.1e sum_Qb=%1.1e\n", sum_Qa, sum_Qb)
-        error = 1
     for i in range(start, n):
         for ax in range(dimension):
             coord = i * dimension + ax
             tot_force[i, ax] = pos_f[coord] - (neg_f[coord] / sum_Q[0])
-            if fabsf(neg_f[i] - neg_f_fast[i]) / neg_f[i] > 1e-3:
-                printf("DIFFERENCE in %i: %1.5e %1.5e\n", i, neg_f[i],
-                        neg_f_fast[i])
-                error = 1
+    sQ = sum_Q[0]
     free(sum_Q)
     free(neg_f)
     free(neg_f_fast)
     free(pos_f)
-    return error
+    return sQ
+
 
 cdef void compute_gradient_positive(float[:,:] val_P,
                                     float[:,:] pos_reference,
+                                    long[:,:] neighbors,
                                     float* pos_f,
-                                    int dimension) nogil:
-    # Sum over the following expression for i not equal to j
-    # grad_i = p_ij (1 + ||y_i - y_j||^2)^-1 (y_i - y_j)
-    # This is equivalent to compute_edge_forces in the authors' code
-    cdef:
-        int ax
-        long i, j, temp
-        long n = val_P.shape[0]
-        float buff[3]
-        float D
-    for i in range(n):
-        for ax in range(dimension):
-            pos_f[i * dimension + ax] = 0.0
-        for j in range(n):
-            if i == j : 
-                continue
-            D = 0.0
-            for ax in range(dimension):
-                buff[ax] = pos_reference[i, ax] - pos_reference[j, ax]
-                D += buff[ax] ** 2.0  
-            D = val_P[i, j] / (1.0 + D)
-            for ax in range(dimension):
-                pos_f[i * dimension + ax] += D * buff[ax]
-                temp = i * dimension + ax
-
-
-cdef void compute_gradient_positive_nn(float[:,:] val_P,
-                                       float[:,:] pos_reference,
-                                       long[:,:] neighbors,
-                                       float* pos_f,
-                                       int dimension,
-                                       long start) nogil:
+                                    int dimension,
+                                    float dof,
+                                    long start) nogil:
     # Sum over the following expression for i not equal to j
     # grad_i = p_ij (1 + ||y_i - y_j||^2)^-1 (y_i - y_j)
     # This is equivalent to compute_edge_forces in the authors' code
@@ -547,6 +501,7 @@ cdef void compute_gradient_positive_nn(float[:,:] val_P,
         long n = val_P.shape[0]
         float[3] buff
         float D
+        float exponent = (dof + 1.0) / -2.0
     for i in range(start, n):
         for ax in range(dimension):
             pos_f[i * dimension + ax] = 0.0
@@ -558,7 +513,7 @@ cdef void compute_gradient_positive_nn(float[:,:] val_P,
             for ax in range(dimension):
                 buff[ax] = pos_reference[i, ax] - pos_reference[j, ax]
                 D += buff[ax] ** 2.0  
-            D = val_P[i, j] / (1.0 + D)
+            D = val_P[i, j] * (((1.0 + D) / dof) ** exponent)
             for ax in range(dimension):
                 pos_f[i * dimension + ax] += D * buff[ax]
 
@@ -569,47 +524,10 @@ cdef void compute_gradient_negative(float[:,:] val_P,
                                     float* neg_f,
                                     Node *root_node,
                                     float* sum_Q,
+                                    float dof,
                                     float theta, 
                                     long start, 
                                     long stop) nogil:
-    if stop == -1:
-        stop = pos_reference.shape[0] 
-    cdef:
-        int ax
-        long i
-        long n = stop - start
-        float* force
-        float* iQ 
-        float* pos
-        int dimension = root_node.tree.dimension
-
-    iQ = <float*> malloc(sizeof(float))
-    force = <float*> malloc(sizeof(float) * dimension)
-    pos = <float*> malloc(sizeof(float) * dimension)
-    for i in range(start, stop):
-        # Clear the arrays
-        for ax in range(dimension): 
-            force[ax] = 0.0
-            pos[ax] = pos_reference[i, ax]
-        iQ[0] = 0.0
-        compute_non_edge_forces(root_node, theta, iQ, i,
-                                pos, force)
-        sum_Q[0] += iQ[0]
-        # Save local force into global
-        for ax in range(dimension): 
-            neg_f[i * dimension + ax] = force[ax]
-    free(iQ)
-    free(force)
-    free(pos)
-
-cdef void compute_gradient_negative_fast(float[:,:] val_P, 
-                                         float[:,:] pos_reference,
-                                         float* neg_f,
-                                         Node *root_node,
-                                         float* sum_Q,
-                                         float theta, 
-                                         long start, 
-                                         long stop) nogil:
     if stop == -1:
         stop = pos_reference.shape[0] 
     cdef:
@@ -629,7 +547,6 @@ cdef void compute_gradient_negative_fast(float[:,:] val_P,
         long dta = 0
         long dtb = 0
         clock_t t1, t2, t3
-        # Delete
         float* neg_force
 
     iQ = <float*> malloc(sizeof(float))
@@ -652,15 +569,16 @@ cdef void compute_gradient_negative_fast(float[:,:] val_P,
         # Find which nodes are summarizing and collect their centers of mass
         # deltas, and sizes, into vectorized arrays
         t1 = clock()
-        compute_non_edge_forces_fast(root_node, theta, i, pos, force, dist2s,
+        compute_non_edge_forces(root_node, theta, i, pos, force, dist2s,
                                      sizes, deltas, l)
         t2 = clock()
         # Compute the t-SNE negative force
         # for the digits dataset, walking the tree
         # is about 10-15x more expensive than the 
         # following for loop
+        exponent = (dof + 1.0) / -2.0
         for j in range(l[0]):
-            qijZ = 1.0 / (1.0 + dist2s[j])
+            qijZ = ((1.0 + dist2s[j]) / dof) ** exponent
             sum_Q[0] += sizes[j] * qijZ
             mult = sizes[j] * qijZ * qijZ
             for ax in range(dimension):
@@ -685,59 +603,6 @@ cdef void compute_gradient_negative_fast(float[:,:] val_P,
 
 
 cdef void compute_non_edge_forces(Node* node, 
-                                  float theta,
-                                  float* sum_Q,
-                                  long point_index,
-                                  float* pos,
-                                  float* force) nogil:
-    # Compute the t-SNE force on the point in pos given by point_index
-    cdef:
-        Node* child
-        int i, j
-        int summary = 0
-        int dimension = node.tree.dimension
-        float dist2, mult, qijZ
-        float* delta  = <float*> malloc(sizeof(float) * dimension)
-    
-    for i in range(dimension):
-        delta[i] = 0.0
-
-    # There are no points below this node if cum_size == 0
-    # so do not bother to calculate any force contributions
-    # Also do not compute self-interactions
-    if node.cum_size > 0 and not (node.is_leaf and (node.point_index ==
-        point_index)):
-        dist2 = 0.0
-        # Compute distance between node center of mass and the reference point
-        for i in range(dimension):
-            delta[i] += pos[i] - node.cum_com[i] 
-            dist2 += delta[i]**2.0
-        # Check whether we can use this node as a summary
-        # It's a summary node if the angular size as measured from the point
-        # is relatively small (w.r.t. to theta) or if it is a leaf node.
-        # If it can be summarized, we use the cell center of mass 
-        # Otherwise, we go a higher level of resolution and into the leaves.
-        summary = (node.max_width / sqrt(dist2) < theta)
-        if node.is_leaf or summary:
-            # Compute the t-SNE force between the reference point and the
-            # current node
-            qijZ = 1.0 / (1.0 + dist2)
-            sum_Q[0] += node.cum_size * qijZ
-            mult = node.cum_size * qijZ * qijZ
-            for ax in range(dimension):
-                force[ax] += mult * delta[ax]
-        else:
-            # Recursively apply Barnes-Hut to child nodes
-            for idx in range(node.tree.ncell):
-                child = node.children[idx]
-                if child.cum_size == 0: 
-                    continue
-                compute_non_edge_forces(child, theta, sum_Q, 
-                                        point_index, pos, force)
-    free(delta)
-
-
-cdef void compute_non_edge_forces_fast(Node* node, 
                                   float theta,
                                   long point_index,
                                   float* pos,
@@ -787,9 +652,31 @@ cdef void compute_non_edge_forces_fast(Node* node,
                 child = node.children[idx]
                 if child.cum_size == 0: 
                     continue
-                compute_non_edge_forces_fast(child, theta,
+                compute_non_edge_forces(child, theta,
                         point_index, pos, force, dist2s, sizes, deltas,
                         l)
+
+
+cdef float compute_error(float[:, :] val_P,
+                        float[:, :] pos_reference,
+                        long[:,:] neighbors,
+                        float sum_Q,
+                        int dimension) nogil:
+    cdef int i, j, ax
+    cdef int I = neighbors.shape[0]
+    cdef int K = neighbors.shape[1]
+    cdef float pij, Q
+    cdef float C = 0.0
+    for i in range(I):
+        for k in range(K):
+            j = neighbors[i, k]
+            pij = val_P[i, j]
+            Q = 0.0
+            for ax in range(dimension):
+                Q += (pos_reference[i, ax] - pos_reference[j, ax]) ** 2.0
+            Q = (1.0 / (1.0 + Q)) / sum_Q
+            C += pij * log((pij + EPSILON) / (Q + EPSILON))
+    return C
 
 
 def calculate_edge(pos_output):
@@ -812,6 +699,7 @@ def gradient(float[:,:] pij_input,
              float theta,
              int dimension,
              int verbose,
+             float dof = 1.0,
              long skip_num_points=0):
     # This function is designed to be called from external Python
     # it passes the 'forces' array by reference and fills thats array
@@ -832,8 +720,6 @@ def gradient(float[:,:] pij_input,
     assert n == pij_input.shape[0], m
     m = "Pij and pos_output shapes are incompatible"
     assert n == pij_input.shape[1], m
-    m = "Only 2D and 3D embeddings supported. Width array must be size 2 or 3"
-    assert width.shape[0] <= 3, m
     if verbose > 10:
         printf("[t-SNE] Initializing tree of dimension %i\n", dimension)
     cdef Tree* qt = init_tree(left_edge, width, dimension, verbose)
@@ -843,8 +729,11 @@ def gradient(float[:,:] pij_input,
     assert err == 0, "[t-SNE] Insertion failed"
     if verbose > 10:
         printf("[t-SNE] Computing gradient\n")
-    compute_gradient(pij_input, pos_output, neighbors, forces, qt.root_node, 
-                     theta, skip_num_points, -1)
+    sum_Q = compute_gradient(pij_input, pos_output, neighbors, forces,
+                             qt.root_node, theta, dof, skip_num_points, -1)
+    if verbose > 10:
+        printf("[t-SNE] Computing KL divergence error\n")
+    C = compute_error(pij_input, pos_output, neighbors, sum_Q, dimension)
     if verbose > 10:
         printf("[t-SNE] Checking tree consistency \n")
     cdef long count = count_points(qt.root_node, 0)
@@ -854,6 +743,7 @@ def gradient(float[:,:] pij_input,
     m = "Tree consistency failed: unexpected number of points on the tree"
     assert count == qt.num_part, m
     free_tree(qt)
+    return C
 
 
 # Helper functions
@@ -890,12 +780,14 @@ cdef int helper_test_index2offset(int* check, int index, int dimension):
 
 
 def test_index2offset():
-    assert helper_test_index2offset([1, 0, 1], 5, 3) == 1
-    assert helper_test_index2offset([0, 0, 0], 0, 3) == 1
-    assert helper_test_index2offset([0, 0, 1], 1, 3) == 1
-    assert helper_test_index2offset([0, 1, 0], 2, 3) == 1
-    assert helper_test_index2offset([0, 1, 1], 3, 3) == 1
-    assert helper_test_index2offset([1, 0, 0], 4, 3) == 1
+    ret = 1
+    ret &= helper_test_index2offset([1, 0, 1], 5, 3) == 1
+    ret &= helper_test_index2offset([0, 0, 0], 0, 3) == 1
+    ret &= helper_test_index2offset([0, 0, 1], 1, 3) == 1
+    ret &= helper_test_index2offset([0, 1, 0], 2, 3) == 1
+    ret &= helper_test_index2offset([0, 1, 1], 3, 3) == 1
+    ret &= helper_test_index2offset([1, 0, 0], 4, 3) == 1
+    return ret
 
 
 def test_index_offset():
@@ -910,9 +802,6 @@ def test_index_offset():
             index2offset(offset, idx, dimension)
             tidx = offset2index(offset, dimension)
             error_check &= tidx == idx
-            m = "offset is " 
-            for d in range(dimension):
-                m += "%i " % offset[d]
-            m += " index %i t-index %i" % (idx, tidx)
-            assert error_check == 1, m
+            assert error_check == 1
         free(offset)
+    return error_check

@@ -454,27 +454,26 @@ cdef float compute_gradient(float[:,:] val_P,
     cdef float* neg_f_fast = <float*> malloc(sizeof(float) * n * dimension)
     cdef float* pos_f = <float*> malloc(sizeof(float) * n * dimension)
     cdef clock_t t1, t2
-    cdef float sQ 
+    cdef float sQ, error
 
     sum_Q[0] = 0.0
-    t1 = clock()
-    compute_gradient_positive(val_P, pos_reference, neighbors, pos_f,
-                              dimension, dof, start)
-    t2 = clock()
-    if root_node.tree.verbose > 15:
-        printf("[t-SNE] Computing positive gradient: %e ticks\n", ((float) (t2 - t1)))
     t1 = clock()
     compute_gradient_negative(val_P, pos_reference, neg_f, root_node, sum_Q,
                               dof, theta, start, stop)
     t2 = clock()
     if root_node.tree.verbose > 15:
         printf("[t-SNE] Computing negative gradient: %e ticks\n", ((float) (t2 - t1)))
-    error = 0
+    sQ = sum_Q[0]
+    t1 = clock()
+    error = compute_gradient_positive(val_P, pos_reference, neighbors, pos_f,
+                              dimension, dof, sQ, start, root_node.tree.verbose)
+    t2 = clock()
+    if root_node.tree.verbose > 15:
+        printf("[t-SNE] Computing positive gradient: %e ticks\n", ((float) (t2 - t1)))
     for i in range(start, n):
         for ax in range(dimension):
             coord = i * dimension + ax
             tot_force[i, ax] = pos_f[coord] - (neg_f[coord] / sum_Q[0])
-    sQ = sum_Q[0]
     free(sum_Q)
     free(neg_f)
     free(neg_f_fast)
@@ -482,13 +481,15 @@ cdef float compute_gradient(float[:,:] val_P,
     return sQ
 
 
-cdef void compute_gradient_positive(float[:,:] val_P,
-                                    float[:,:] pos_reference,
-                                    long[:,:] neighbors,
-                                    float* pos_f,
-                                    int dimension,
-                                    float dof,
-                                    long start) nogil:
+cdef float compute_gradient_positive(float[:,:] val_P,
+                                     float[:,:] pos_reference,
+                                     long[:,:] neighbors,
+                                     float* pos_f,
+                                     int dimension,
+                                     float dof,
+                                     float sum_Q,
+                                     long start,
+                                     int verbose) nogil:
     # Sum over the following expression for i not equal to j
     # grad_i = p_ij (1 + ||y_i - y_j||^2)^-1 (y_i - y_j)
     # This is equivalent to compute_edge_forces in the authors' code
@@ -500,8 +501,11 @@ cdef void compute_gradient_positive(float[:,:] val_P,
         long K = neighbors.shape[1]
         long n = val_P.shape[0]
         float[3] buff
-        float D
+        float D, Q, pij
+        float C = 0.0
         float exponent = (dof + 1.0) / -2.0
+    cdef clock_t t1, t2
+    t1 = clock()
     for i in range(start, n):
         for ax in range(dimension):
             pos_f[i * dimension + ax] = 0.0
@@ -510,12 +514,22 @@ cdef void compute_gradient_positive(float[:,:] val_P,
             # we don't need to exclude the i==j case since we've 
             # already thrown it out from the list of neighbors
             D = 0.0
+            Q = 0.0
+            pij = val_P[i, j]
             for ax in range(dimension):
                 buff[ax] = pos_reference[i, ax] - pos_reference[j, ax]
                 D += buff[ax] ** 2.0  
-            D = val_P[i, j] * (((1.0 + D) / dof) ** exponent)
+            Q = (((1.0 + D) / dof) ** exponent)
+            D = pij * Q
+            Q /= sum_Q
+            C += pij * log((pij + EPSILON) / (Q + EPSILON))
             for ax in range(dimension):
                 pos_f[i * dimension + ax] += D * buff[ax]
+    t2 = clock()
+    dt = ((float) (t2 - t1))
+    if verbose > 10:
+        printf("[t-SNE] Computed error=%1.4f in %1.1e ticks\n", C, dt)
+    return C
 
 
 
@@ -661,21 +675,30 @@ cdef float compute_error(float[:, :] val_P,
                         float[:, :] pos_reference,
                         long[:,:] neighbors,
                         float sum_Q,
-                        int dimension) nogil:
+                        int dimension,
+                        int verbose) nogil:
     cdef int i, j, ax
     cdef int I = neighbors.shape[0]
     cdef int K = neighbors.shape[1]
     cdef float pij, Q
     cdef float C = 0.0
+    cdef clock_t t1, t2
+    cdef float dt, delta
+    t1 = clock()
     for i in range(I):
         for k in range(K):
             j = neighbors[i, k]
             pij = val_P[i, j]
             Q = 0.0
             for ax in range(dimension):
-                Q += (pos_reference[i, ax] - pos_reference[j, ax]) ** 2.0
-            Q = (1.0 / (1.0 + Q)) / sum_Q
+                delta = (pos_reference[i, ax] - pos_reference[j, ax])
+                Q += delta * delta
+            Q = (1.0 / (sum_Q + Q * sum_Q))
             C += pij * log((pij + EPSILON) / (Q + EPSILON))
+    t2 = clock()
+    dt = ((float) (t2 - t1))
+    if verbose > 10:
+        printf("[t-SNE] Computed error=%1.4f in %1.1e ticks\n", C, dt)
     return C
 
 
@@ -704,6 +727,7 @@ def gradient(float[:,:] pij_input,
     # This function is designed to be called from external Python
     # it passes the 'forces' array by reference and fills thats array
     # up in-place
+    cdef float C
     n = pos_output.shape[0]
     left_edge, right_edge, width = calculate_edge(pos_output)
     assert width.itemsize == 4
@@ -731,9 +755,8 @@ def gradient(float[:,:] pij_input,
         printf("[t-SNE] Computing gradient\n")
     sum_Q = compute_gradient(pij_input, pos_output, neighbors, forces,
                              qt.root_node, theta, dof, skip_num_points, -1)
-    if verbose > 10:
-        printf("[t-SNE] Computing KL divergence error\n")
-    C = compute_error(pij_input, pos_output, neighbors, sum_Q, dimension)
+    C = compute_error(pij_input, pos_output, neighbors, sum_Q, dimension,
+                      verbose)
     if verbose > 10:
         printf("[t-SNE] Checking tree consistency \n")
     cdef long count = count_points(qt.root_node, 0)

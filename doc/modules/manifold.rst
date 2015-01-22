@@ -518,13 +518,13 @@ The disadvantages to using t-SNE are roughly:
    :scale: 50
 
 Optimizing t-SNE
----------------
+----------------
 
 The main purpose of t-SNE is visualization of high-dimensional data. Hence,
 it works best when the data will be embedded on two or three dimensions.
 
 Optimizing the KL divergence can be a little bit tricky sometimes. There are
-three parameters that control the optimization of t-SNE and therefore possibly
+five parameters that control the optimization of t-SNE and therefore possibly
 the quality of the resulting embedding:
 
 * perplexity

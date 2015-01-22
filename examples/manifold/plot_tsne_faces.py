@@ -3,11 +3,11 @@
 Comparison of t-SNE methods and options
 ===================================
 
-A comparison of t-SNE applied to the Olivetti faces data. The
-'exact' and 'barnes-hut' methods are visualized, as well as
-init='pca' and init='random'. In addition to varying method &
-init, the script also compares preprocessing the input data by
-reducing the dimensionality via PCA.
+A comparison of t-SNE applied to the Olivetti faces data. The 'exact' and
+'barnes-hut' methods are visualized, as well as init='pca' and init='random'.
+In addition to varying method & init, the script also compares preprocessing
+the input data by reducing the dimensionality via PCA and also varying the
+perplexity.
 
 For a discussion and comparison of these algorithms, see the
 :ref:`manifold module page <manifold>`
@@ -36,7 +36,8 @@ def plot_embedding(dataset, X, title=None, ax=None):
     X = (X - x_min) / (x_max - x_min)
     y = dataset.target
     if ax is None:
-        ax = plt.subplot(111)
+        plt.figure(figsize=(18, 15))
+        ax = plt.gca()
     for i in range(X.shape[0]):
         ax.text(X[i, 0], X[i, 1], str(dataset.target[i]),
                 color=plt.cm.Set1(y[i] / 10.),
@@ -61,10 +62,11 @@ def plot_embedding(dataset, X, title=None, ax=None):
     if title is not None:
         ax.set_title(title, loc='left')
 
-f, axs = plt.subplots(2, 2, figsize=(30, 30))
 
 #----------------------------------------------------------------------
-# Fit t-SNE on all 4096 dimensions with random initialization
+# Fit t-SNE on 50 PCA-reduced dimensions with random initialization.
+# We will frequently want to reduce the dimensionality when we have many
+# dimensions since the t-SNE complexity grows linearly with the dimensionality.
 tsne = manifold.TSNE(n_components=2, init='random', random_state=3,
                      n_iter=1000, verbose=verbose, early_exaggeration=50.0,
                      learning_rate=100, perplexity=50)
@@ -77,16 +79,18 @@ dt = time_end - time_start
 
 
 title = ("Barnes-Hut t-SNE Visualization of Olivetti Faces\n" +
-         "in %1.1f seconds & initialized embedding randomly")
+         "in %1.1f seconds on 50-dimensional PCA-reduced data ")
 title = title % dt
-plot_embedding(faces, embedded, title=title, ax=axs[0, 0])
+plot_embedding(faces, embedded, title=title)
 
 
 #-------------------------------------------------------------------------
 # Fit t-SNE on all 4096 dimensions, but use PCA to initialize the embedding
+# Initializing the embedding with PCA allows the final emebedding to preserve
+# global structure leaving t-SNE to optimize the local structure
 tsne = manifold.TSNE(n_components=2, init='pca', random_state=3,
                      n_iter=1000, verbose=verbose, early_exaggeration=50.0,
-                     learning_rate=100, perplexity=50)
+                     learning_rate=100, perplexity=5)
 time_start = time()
 embedded = tsne.fit_transform(faces.data)
 time_end = time()
@@ -96,11 +100,15 @@ dt = time_end - time_start
 title = ("Barnes-Hut t-SNE Visualization of Olivetti Faces\n" +
          "in %1.1f seconds & initialized embedding with PCA ")
 title = title % dt
-plot_embedding(faces, embedded, title=title, ax=axs[0, 1])
+plot_embedding(faces, embedded, title=title)
 
 
 #----------------------------------------------------------------------
-# Fit t-SNE on PCA-reduced dataset from 4096 dimensions to 50
+# Fit t-SNE on 50 PCA-reduced dimensions with random initialization, but reduce
+# the perplexity. Note that the increased perplexity roughly increases the
+# number of neighbors, which effectively decreases the number of clusters.
+# For the example here, theres about 5 images per person, which with a
+# perplexity of 50 forces multiple face-clusters to come together
 tsne = manifold.TSNE(n_components=2, init='random', random_state=3,
                      n_iter=1000, verbose=verbose, early_exaggeration=50.0,
                      learning_rate=100, perplexity=50)
@@ -113,16 +121,19 @@ dt = time_end - time_start
 
 
 title = ("Barnes-Hut t-SNE Visualization of Olivetti Faces\n" +
-         "in %1.1f seconds & randomized PCA preprocessing")
+         "in %1.1f seconds on 50-dimensional PCA-reduced data\n" +
+         "with perplexity increased from 5 to 50")
 title = title % dt
-plot_embedding(faces, embedded, title=title, ax=axs[1, 0])
+plot_embedding(faces, embedded, title=title)
 
 
 #----------------------------------------------------------------------
-# Fit t-SNE using PCA and the exact method
+# Fit t-SNE by random embedding and the exact method. The exact method
+# is similar to Barnes-Hut, but this visualization reinforces the idea
+# that the two methods yield similar results
 tsne = manifold.TSNE(n_components=2, init='random', random_state=3,
                      method='exact', n_iter=10000, verbose=verbose,
-                     learning_rate=100, perplexity=50)
+                     learning_rate=100, perplexity=5)
 time_start = time()
 embedded = tsne.fit_transform(faces.data)
 time_end = time()
@@ -132,6 +143,6 @@ dt = time_end - time_start
 title = ("Exact t-SNE Visualization of Olivetti Faces\n" +
          "in %1.1f seconds with random initialization")
 title = title % dt
-plot_embedding(faces, embedded, title=title, ax=axs[1, 1])
+plot_embedding(faces, embedded, title=title)
 
 plt.show()

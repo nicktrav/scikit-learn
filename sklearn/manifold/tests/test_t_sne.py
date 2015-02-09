@@ -550,3 +550,50 @@ def test_quadtree_similar_point():
         assert_equal(counts[0], counts[1], m)
         m = "Tree consistency failed: unexpected number of points on the tree"
         assert_equal(counts[0], counts[2], m)
+
+
+def test_quadtree_api():
+    """Test the quadtree API via introspection"""
+
+    # Test in two dimensions
+    # Result should return 9 cells (including root nodes for subdivided cells)
+    # Root node width subdivided twice implies that width_min = width_max / 2^2
+    X = np.array([[1, 2], [3, 4], [5, 7]], dtype=np.float64)
+    res = _barnes_hut_tsne.check_quadtree_api(X)
+    m = "Tree consistency failed: unexpected dimension"
+    assert_equal(res['dimension'], 2, m)
+    m = "Tree consistency failed: unexpected number of cells"
+    assert_equal(res['n_cells'], 9, m)
+    m = "Tree consistency failed: unexpected number of particles"
+    assert_equal(res['n_particles'], 3, m)
+    m = "Tree consistency failed: unexpected maximum level"
+    assert_equal(res['level_max'], 2, m)
+    m = "Tree consistency failed: unexpected maximum width vector"
+    assert_almost_equal(res['width_max'][0], 4 * 1.001, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_max'][1], 5 * 1.001, decimal=3, err_msg=m)
+    m = "Tree consistency failed: unexpected minimum width vector"
+    assert_almost_equal(res['width_min'][0], (4 * 1.001)/4, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_min'][1], (5 * 1.001)/4, decimal=3, err_msg=m)
+
+    # Test in three dimensions
+    # Result should return 8 cells (including root nodes for subdivided cells)
+    # Root node width subdivided once implies that width_min = width_max / 2^1
+    X = np.array([[1, 2, 3], [10, 20, 30]], dtype=np.float64)
+    res = _barnes_hut_tsne.check_quadtree_api(X)
+    m = "Tree consistency failed: unexpected dimension"
+    assert_equal(res['dimension'], 3, m)
+    m = "Tree consistency failed: unexpected number of cells"
+    assert_equal(res['n_cells'], 9, m)
+    m = "Tree consistency failed: unexpected number of particles"
+    assert_equal(res['n_particles'], 2, m)
+    m = "Tree consistency failed: unexpected maximum level"
+    assert_equal(res['level_max'], 1, m)
+    m = "Tree consistency failed: unexpected maximum width vector"
+    assert_almost_equal(res['width_max'][0], 9 * 1.001, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_max'][1], 18 * 1.001, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_max'][2], 27 * 1.001, decimal=3, err_msg=m)
+    m = "Tree consistency failed: unexpected minimum width vector"
+    assert_almost_equal(res['width_min'][0], (9 * 1.001)/2, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_min'][1], (18 * 1.001)/2, decimal=3, err_msg=m)
+    assert_almost_equal(res['width_min'][2], (27 * 1.001)/2, decimal=3, err_msg=m)
+    return

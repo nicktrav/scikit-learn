@@ -608,7 +608,7 @@ def calculate_edge(pos_output):
     # Make the boundaries slightly outside of the data
     # to avoid floating point error near the edge
     left_edge = np.min(pos_output, axis=0)
-    right_edge = np.max(pos_output, axis=0) 
+    right_edge = np.max(pos_output, axis=0)
     center = (right_edge + left_edge) * 0.5
     width = np.maximum(np.subtract(right_edge, left_edge), EPSILON)
     # Exagerate width to avoid boundary edge
@@ -686,3 +686,66 @@ def check_quadtree(X, long[:] counts):
     counts[2] = qt.n_particles
     free_tree(qt)
     return counts
+
+cdef void get_quadtree_params(QuadOctNode *root,
+                              np.ndarray[np.float64_t, ndim=1] width_maxima,
+                              np.ndarray[np.float64_t, ndim=1] width_minima,
+                              np.ndarray[np.int64_t, ndim=1] level_max):
+    """
+    Traverse the tree, keeping track of the parameters as we descend.
+    """
+    cdef int i, j, krange
+    cdef int k = 0
+    cdef QuadOctNode* child
+    if root.tree.dimension > 2:
+        krange = 2
+    else:
+        krange = 1
+
+    # update the maximum depth of the tree (the level)
+    if root.level > level_max[0]:
+        level_max[0] = root.level
+
+    # update the width maxima and minima
+    for ix in range(root.tree.dimension):
+        if root.width[ix] > width_maxima[ix]:
+            width_maxima[ix] = root.width[ix]
+        if root.width[ix] < width_minima[ix]:
+            width_minima[ix] = root.width[ix]
+
+    # recursively descend if this is not a leaf node
+    for i in range(2):
+        for j in range(2):
+            for k in range(krange):
+                if not root.is_leaf:
+                    child = root.children[i][j][k]
+                    get_quadtree_params(child, width_maxima, width_minima, level_max)
+
+def check_quadtree_api(X):
+    """
+    Helper function to test the functionality of quadtree API.
+    Returns a dictionary object of the quadtree.
+    """
+
+    X = X.astype(np.float32)
+    left_edge, right_edge, width = calculate_edge(X)
+    # Initialise a tree
+    qt = init_tree(left_edge, width, X.shape[1], 2)
+    # Insert data into the tree
+    insert_many(qt, X)
+
+    properties = {}
+    properties['n_cells'] = qt.n_cells
+    properties['n_particles'] = qt.n_particles
+    properties['dimension'] = qt.dimension
+    width_maxima = np.zeros(qt.dimension, dtype=np.float64)
+    width_minima = np.array(width, dtype=np.float64)
+    level_max = np.zeros(1, dtype=np.int64)
+    get_quadtree_params(qt.root_node, width_maxima, width_minima, level_max)
+    properties['width_max'] = width_maxima
+    properties['width_min'] = width_minima
+    properties['level_max'] = level_max
+
+    free_tree(qt)
+
+    return properties
